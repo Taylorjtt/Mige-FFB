@@ -9,6 +9,7 @@ extern "C"
 	#include "Math/clarke.h"
 	#include "Math/park.h"
 	#include "Math/ipark.h"
+    #include "Math/svgen.h"
 
 }
 #include "Math/IQmathCPP.h"
@@ -19,14 +20,14 @@ extern "C"
 #define MOTOR_POLES 8
 //https://electronics.stackexchange.com/questions/187835/induction-motor-electrical-and-mechanical-angle
 #define TICKS_TO_ELECTRICAL_ANGLE (MATH_TWO_PI/ENCODER_CPR)*(MOTOR_POLES/2)
-
+CLARKE clarke;
 PARK park;
 TMS320F2806 processor;
 OSWDigital digital;
 QuadratureEncoder encoder;
 OSWInverter inverter;
 CurrentSensor currentSensor;
-
+SVGEN_Handle  svgen;
 
 float PWMC = 0.0;
 float PWMA = 0.0;
@@ -84,6 +85,7 @@ float va = 0.0;
 float vb = 0.0;
 float ia = 0.0;
 float ib = 0.0;
+float ic = 0.0;
 float vectorTheta = 0.0;
 
 _iq theta = 0;
@@ -142,7 +144,7 @@ int main(void)
 	encoder = QuadratureEncoder(processor,digital,ENCODER_PPR);
 	inverter = OSWInverter(processor, digital,80,50,1);
 	currentSensor = CurrentSensor(processor,digital,inverter);
-
+	svgen = SVGEN_init(svgen, sizeof(SVGEN_Obj));
 
 
 	park.Alpha = 0;
@@ -186,14 +188,25 @@ int main(void)
 		//read the phase currents
 		ia = -((int32_t)AdcResult.ADCRESULT0 - offset)*0.0080566;
 		ib = -((int32_t)AdcResult.ADCRESULT1 - offset)*0.0080566;
+		ic = -(ia + ib); //edit this to read the actual ic value
 
-		theta = _IQ24(thetaE);
-		SINE = _IQ24sin(theta);
-		COS = _IQ24cos(theta);
-		park.Sine = SINE;
-		park.Cosine = COS;
-		park.Alpha = _IQ24(ia);
-		park.Beta = _IQ24(ib);
+        theta = _IQ24(thetaE);
+        SINE = _IQ24sin(theta);
+        COS = _IQ24cos(theta);
+        park.Sine = SINE;
+        park.Cosine = COS;
+
+		/*
+		 * Clarke Transform
+		 */
+		clarke.As = _IQ24(ia);
+		clarke.Bs = _IQ24(ib);
+		clarke.Cs = _IQ24(ic);
+		CLARKE1_MACRO(clarke);
+
+
+		park.Alpha = clarke.Alpha;
+		park.Beta = clarke.Beta;
 		PARK_MACRO(park);
 
 		iq_qErr = iq_iDes - park.Qs;
@@ -221,6 +234,10 @@ int main(void)
 
 		IPARK_MACRO(park);
 
+		clarke.Alpha = park.Alpha;
+		clarke.Beta = park.Beta;
+
+
 		a = _IQ24toF(park.Alpha);
 		b = _IQ24toF(park.Beta);
 
@@ -236,43 +253,6 @@ int main(void)
 		/*
 		 * Convert the control loop output to PWM signals on phase A, B and C
 		 */
-		iq_max = MAX(park.Alpha, park.Beta);
-		iq_min = MIN(park.Alpha, park.Beta);
-		iq_PWMC = _IQmpy(iq_one_half,(iq_oneHundred-(_IQmpy((_IQdiv(iq_max,iq_maxCurrent) - _IQdiv(iq_min,iq_maxCurrent)),iq_oneHundred))));
-		iq_PWMA = iq_PWMC + _IQmpy(iq_oneHundred,_IQdiv(park.Alpha,iq_maxCurrent));
-		iq_PWMB = iq_PWMC + _IQmpy(iq_oneHundred,_IQdiv(park.Beta,iq_maxCurrent));
-
-		PWMA = _IQ24toF(iq_PWMA);
-		PWMB = _IQ24toF(iq_PWMB);
-		PWMC = _IQ24toF(iq_PWMC);
-		if(PWMA < 0)
-		{
-			PWMA = 0;
-		}
-		if(PWMA > 73)
-		{
-			PWMA = 73;
-		}
-		if(PWMB < 0)
-		{
-			PWMB = 0;
-		}
-		if(PWMB > 73)
-		{
-			PWMB = 73;
-		}
-		if(PWMC < 31)
-		{
-			PWMC = 31;
-		}
-		if(PWMC > 50)
-		{
-			PWMC = 50;
-		}
-
-		aCount = 20*PWMA;
-		bCount = 20*PWMB;
-		cCount = 20*PWMC;
 
 		EPwm1Regs.CMPA.half.CMPA = (uint16_t)aCount;
 		EPwm2Regs.CMPA.half.CMPA = (uint16_t)bCount;
